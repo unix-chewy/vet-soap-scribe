@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI SOAP Note Generator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="icon" href="data:," />
+  <style>
+    body { background-color: #f8fafc; }
+    .spinner {
+      border: 3px solid rgba(255, 255, 255, 0.3); border-radius: 50%;
+      border-top: 3px solid #fff; width: 20px; height: 20px;
+      animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-right: 8px;
+    }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .soap-list { list-style-type: disc; padding-left: 1.5rem; }
+    .soap-list li { margin-bottom: 0.5rem; line-height: 1.4; color: #1e293b; }
+    .soap-list li.not-mentioned { color: #94a3b8; font-style: italic; }
+  </style>
+</head>
+<body class="text-slate-800 font-sans min-h-screen pb-12">
+
+  <nav class="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center shadow-sm">
+    <div class="flex items-center gap-2 font-bold text-slate-700">
+      <span class="text-xl">🩺</span> SOAP Note Generator
+    </div>
+    <div class="text-sm text-slate-500 space-x-4 hidden md:block">
+      <span>Specialties</span><span>Examples</span><span>Guide</span>
+    </div>
+  </nav>
+
+  <main class="max-w-3xl mx-auto px-4 py-8 md:py-12">
+    <div class="text-center mb-8">
+      <h1 class="text-4xl font-extrabold text-slate-800 mb-2">AI SOAP Note Generator</h1>
+      <p class="text-slate-500 text-lg">Enter your case notes. Get a complete AI-generated SOAP note in seconds.</p>
+    </div>
+
+    <div id="inputSection" class="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-8">
+      <label class="block font-semibold text-slate-700 mb-2">Case Note</label>
+      <textarea id="rawNotes" rows="5" class="w-full p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 focus:border-teal-500 outline-none transition resize-y mb-4" placeholder="e.g. 2yo M pug. Halitosis. Tartar buildup bilateral. Gums red. Needs dental cleaning.">2yo M pug. Halitosis. Tartar buildup bilateral. Gums red. Otherwise healthy. Eats well. Vaccines up to date. Needs dental cleaning.</textarea>
+      
+      <button id="generateBtn" class="w-full bg-slate-700 hover:bg-slate-800 text-white font-bold py-3 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center">
+        Generate SOAP Note
+      </button>
+      <div id="status" class="text-center text-sm text-slate-500 mt-3 h-5">Engine unloaded. Will download model on first click.</div>
+    </div>
+
+    <div id="outputSection" class="hidden space-y-4">
+      <div id="card-S" class="hidden bg-teal-50 border border-teal-200 rounded-xl overflow-hidden shadow-sm">
+        <div class="bg-teal-100/50 px-4 py-3 border-b border-teal-200 flex items-center gap-3">
+          <span class="bg-teal-600 text-white w-6 h-6 flex items-center justify-center rounded font-bold text-sm">S</span>
+          <h3 class="font-bold text-teal-900">Subjective</h3>
+          <button onclick="copySection('S')" class="ml-auto text-xs text-teal-700 font-semibold hover:underline">Copy</button>
+        </div>
+        <div class="p-5 bg-white"><ul id="list-S" class="soap-list"></ul></div>
+      </div>
+
+      <div id="card-O" class="hidden bg-blue-50 border border-blue-200 rounded-xl overflow-hidden shadow-sm">
+        <div class="bg-blue-100/50 px-4 py-3 border-b border-blue-200 flex items-center gap-3">
+          <span class="bg-blue-600 text-white w-6 h-6 flex items-center justify-center rounded font-bold text-sm">O</span>
+          <h3 class="font-bold text-blue-900">Objective</h3>
+          <button onclick="copySection('O')" class="ml-auto text-xs text-blue-700 font-semibold hover:underline">Copy</button>
+        </div>
+        <div class="p-5 bg-white"><ul id="list-O" class="soap-list"></ul></div>
+      </div>
+
+      <div id="card-A" class="hidden bg-purple-50 border border-purple-200 rounded-xl overflow-hidden shadow-sm">
+        <div class="bg-purple-100/50 px-4 py-3 border-b border-purple-200 flex items-center gap-3">
+          <span class="bg-purple-600 text-white w-6 h-6 flex items-center justify-center rounded font-bold text-sm">A</span>
+          <h3 class="font-bold text-purple-900">Assessment</h3>
+          <button onclick="copySection('A')" class="ml-auto text-xs text-purple-700 font-semibold hover:underline">Copy</button>
+        </div>
+        <div class="p-5 bg-white"><ul id="list-A" class="soap-list"></ul></div>
+      </div>
+
+      <div id="card-P" class="hidden bg-orange-50 border border-orange-200 rounded-xl overflow-hidden shadow-sm">
+        <div class="bg-orange-100/50 px-4 py-3 border-b border-orange-200 flex items-center gap-3">
+          <span class="bg-orange-600 text-white w-6 h-6 flex items-center justify-center rounded font-bold text-sm">P</span>
+          <h3 class="font-bold text-orange-900">Plan</h3>
+          <button onclick="copySection('P')" class="ml-auto text-xs text-orange-700 font-semibold hover:underline">Copy</button>
+        </div>
+        <div class="p-5 bg-white"><ul id="list-P" class="soap-list"></ul></div>
+      </div>
+
+      <div class="mt-8">
+        <button id="nextBtn" class="w-full bg-teal-700 hover:bg-teal-800 text-white font-bold py-4 rounded-xl shadow-md transition text-lg">Next: Generate Objective</button>
+        <div id="finalActions" class="hidden flex gap-3 justify-center mt-4">
+          <button onclick="copyAll()" class="bg-slate-600 hover:bg-slate-700 text-white font-semibold py-2 px-6 rounded-lg transition">Copy All</button>
+          <button onclick="window.location.reload()" class="bg-white border border-slate-300 text-slate-700 font-semibold py-2 px-6 rounded-lg hover:bg-slate-50 transition">Start Over</button>
+        </div>
+      </div>
+
+      <div class="flex justify-center gap-2 mt-6">
+        <div class="w-2.5 h-2.5 rounded-full bg-slate-300 transition" id="dot-S"></div>
+        <div class="w-2.5 h-2.5 rounded-full bg-slate-300 transition" id="dot-O"></div>
+        <div class="w-2.5 h-2.5 rounded-full bg-slate-300 transition" id="dot-A"></div>
+        <div class="w-2.5 h-2.5 rounded-full bg-slate-300 transition" id="dot-P"></div>
+      </div>
+      <p class="text-center text-sm text-slate-500 mt-2" id="stepText">1 of 4</p>
+    </div>
+  </main>
+
+  <script type="module">
+    import { CreateWebWorkerMLCEngine } from "https://esm.run/@mlc-ai/web-llm";
+
+    const $ = (id) => document.getElementById(id);
+    const rawNotes = $('rawNotes');
+    const generateBtn = $('generateBtn');
+    const statusEl = $('status');
+    const inputSection = $('inputSection');
+    const outputSection = $('outputSection');
+    const nextBtn = $('nextBtn');
+    const finalActions = $('finalActions');
+
+    let engine = null;
+    let busy = false;
+    let currentStep = 1;
+    let soapData = { S: [], O: [], A: [], P: [] };
+
+    const MODEL_ID = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
+    function setStatus(msg) { statusEl.textContent = msg; }
+
+    async function generate() {
+      if (busy) return;
+      const notes = rawNotes.value.trim();
+      if (!notes) return;
+
+      busy = true;
+      generateBtn.disabled = true;
+      generateBtn.innerHTML = '<span class="spinner"></span> Processing...';
+      
+      try {
+        if (!engine) {
+          if (!navigator.gpu) throw new Error("WebGPU not supported.");
+          setStatus("Loading Qwen 1.5B...");
+          const workerCode = `import { WebWorkerMLCEngineHandler } from "https://esm.run/@mlc-ai/web-llm"; const handler = new WebWorkerMLCEngineHandler(); self.onmessage = (msg) => { handler.onmessage(msg); };`;
+          const worker = new Worker(URL.createObjectURL(new Blob([workerCode], { type: 'application/javascript' })), { type: 'module' });
+          engine = await CreateWebWorkerMLCEngine(worker, MODEL_ID, {
+            initProgressCallback: (report) => setStatus(report.text)
+          });
+        }
+
+        // One call for all four sections. Four separate calls let the model see the
+        // same fact in two different prompts and echo it into two sections.
+        setStatus("Generating SOAP note...");
+        soapData = await extractSOAP(notes);
+        for (const key of ['S', 'O', 'A', 'P']) {
+          $(`list-${key}`).innerHTML = soapData[key].map(renderItem).join('');
+        }
+
+        inputSection.classList.add('hidden');
+        outputSection.classList.remove('hidden');
+        showStep(1);
+
+      } catch (err) {
+        console.error(err);
+        setStatus(`Error: ${err.message}`);
+        generateBtn.disabled = false;
+        generateBtn.textContent = "Generate SOAP Note";
+      } finally {
+        busy = false;
+      }
+    }
+
+    const NOT_MENTIONED = '[NOT MENTIONED]';
+
+    const SOAP_SYSTEM = `You are a veterinary SOAP note editor. Convert raw case notes into ONE JSON object with exactly four arrays of strings: "S", "O", "A", "P".
+
+RULES
+1. Use ONLY facts present in the notes. Never invent findings, diagnoses, dosages, procedures, or dates.
+2. Keep clinical shorthand verbatim ("2yo M pug", "Halitosis", "Tartar buildup bilateral").
+3. Each fact appears in exactly one section. Never repeat a fact in two sections.
+4. S = signalment, history, and what the owner reports or has noticed ("Halitosis", owner-reported "gums red").
+5. O = findings recorded by the clinician: exam findings ("Tartar buildup bilateral", "Gums red"), vitals, test results.
+6. A = an explicit diagnosis or problem list only, and only when the notes state one. If no diagnosis is stated, A must be exactly ["[NOT MENTIONED]"]. Exam findings are NOT a diagnosis.
+7. P = actions taken or clearly recommended ("Dental cleaning").
+8. If a section has nothing, use exactly ["[NOT MENTIONED]"].
+9. Output JSON only. No prose, no markdown, no code fences.
+
+EXAMPLES
+
+Input: 3yo F cat. Vomiting. Temp 39.5. Dehydration. Give fluids.
+Output: {"S":["3yo F cat.","Vomiting."],"O":["Temp 39.5.","Dehydration."],"A":["[NOT MENTIONED]"],"P":["Give fluids."]}
+
+Input: 1yo F rabbit. Not eating. Suspect GI stasis. Give fluids and metoclopramide.
+Output: {"S":["1yo F rabbit.","Not eating."],"O":["[NOT MENTIONED]"],"A":["Suspect GI stasis."],"P":["Give fluids.","Metoclopramide."]}`;
+
+    async function extractSOAP(notes) {
+      const reply = await engine.chat.completions.create({
+        messages: [
+          { role: 'system', content: SOAP_SYSTEM },
+          { role: 'user', content: notes }
+        ],
+        temperature: 0.0,
+        top_p: 1,
+        max_tokens: 600,
+        stop: ['\n\nInput:', '<|im_end|>']
+      });
+      return parseSOAP(reply.choices[0].message.content);
+    }
+
+    // Turns whatever the model returned into exactly four non-empty arrays.
+    // Never throws: a bad answer degrades to [NOT MENTIONED], not a broken page.
+    function parseSOAP(text) {
+      const out = { S: [], O: [], A: [], P: [] };
+      let raw = (text || '').replace(/```(?:json)?/gi, '').trim();
+
+      // Model may wrap or annotate the JSON; grab the outermost object.
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      let parsed = null;
+      if (start !== -1 && end > start) {
+        try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { parsed = null; }
+      }
+
+      const keys = { s: 'S', o: 'O', a: 'A', p: 'P', subjective: 'S', objective: 'O', assessment: 'A', plan: 'P' };
+      for (const [k, v] of Object.entries(parsed || {})) {
+        const target = keys[String(k).toLowerCase()];
+        if (!target) continue;
+        out[target] = (Array.isArray(v) ? v : String(v ?? '').split(/\n+/))
+          .map(cleanItem)
+          .filter(item => item && item !== NOT_MENTIONED);
+      }
+
+      // If the model did not give usable JSON, fall back to plain bullet lines.
+      if (!out.S.length && !out.O.length && !out.A.length && !out.P.length) {
+        out.S = raw.split(/\n+/).map(cleanItem).filter(Boolean);
+      }
+
+      // Assessment must never be a copy of an Objective finding (the model's
+      // favourite failure: "Bilateral tartar buildup." promoted to a diagnosis).
+      // Compared as word sets so "Bilateral tartar buildup." matches
+      // "Tartar buildup bilateral."
+      const objective = new Set(out.O.map(wordKey));
+      out.A = out.A.filter(item => !objective.has(wordKey(item)));
+
+      for (const key of ['S', 'O', 'A', 'P']) {
+        out[key] = dedupe(out[key]);
+        if (!out[key].length) out[key] = [NOT_MENTIONED];
+      }
+      return out;
+    }
+
+    const normalize = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    // Order-independent key, ignoring trailing articles/stop-words.
+    const wordKey = (s) => [...new Set(normalize(s).split(' ').filter(Boolean))]
+      .filter(w => !['the', 'a', 'an'].includes(w)).sort().join(' ');
+    const cleanItem = (s) => String(s).replace(/^[-\u2022*\s]+/, '').replace(/\s+/g, ' ').trim();
+
+    function dedupe(items) {
+      const seen = new Set();
+      return items.filter(item => {
+        const key = normalize(item);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    function renderItem(item) {
+      if (item === NOT_MENTIONED) {
+        return `<li class="not-mentioned">${NOT_MENTIONED}</li>`;
+      }
+      const div = document.createElement('div');
+      div.textContent = item;
+      return `<li>${div.innerHTML}</li>`;
+    }
+
+    // ... Keep the rest of the UI functions the same ...
+    function showStep(step) {
+      currentStep = step;
+      const keys = ['S', 'O', 'A', 'P'];
+      keys.forEach((key, i) => {
+        if (i < step) $(`card-${key}`).classList.remove('hidden');
+        else $(`card-${key}`).classList.add('hidden');
+      });
+      const colorMap = { 1: 'bg-teal-600', 2: 'bg-blue-600', 3: 'bg-purple-600', 4: 'bg-orange-600' };
+      for (let i = 1; i <= step; i++) {
+        const key = i === 1 ? 'S' : i === 2 ? 'O' : i === 3 ? 'A' : 'P';
+        $(`dot-${key}`).classList.add(colorMap[i]);
+      }
+      if (step === 1) nextBtn.textContent = 'Next: Generate Objective';
+      else if (step === 2) nextBtn.textContent = 'Next: Generate Assessment';
+      else if (step === 3) nextBtn.textContent = 'Next: Generate Plan';
+      else {
+        nextBtn.classList.add('hidden');
+        finalActions.classList.remove('hidden');
+      }
+      $('stepText').textContent = `${step} of 4`;
+      if (step > 1) {
+        const cardId = step === 2 ? 'card-O' : step === 3 ? 'card-A' : 'card-P';
+        $(cardId).scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+
+    function copySection(key) {
+      navigator.clipboard.writeText(soapData[key].map(i => `- ${i}`).join('\n'));
+    }
+
+    function copyAll() {
+      let fullText = `S:\n${soapData.S.map(i=>`- ${i}`).join('\n')}\n\nO:\n${soapData.O.map(i=>`- ${i}`).join('\n')}\n\nA:\n${soapData.A.map(i=>`- ${i}`).join('\n')}\n\nP:\n${soapData.P.map(i=>`- ${i}`).join('\n')}`;
+      navigator.clipboard.writeText(fullText);
+      alert("Full SOAP Note copied to clipboard!");
+    }
+
+    rawNotes.addEventListener('input', () => {
+      generateBtn.disabled = busy || !rawNotes.value.trim();
+    });
+    generateBtn.addEventListener('click', generate);
+    nextBtn.addEventListener('click', () => { if (currentStep < 4) showStep(currentStep + 1); });
+  </script>
+</body>
+</html>
