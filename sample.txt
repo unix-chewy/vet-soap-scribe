@@ -1,0 +1,12 @@
+
+Dental Sample:
+2yo M pug. Halitosis. Tartar buildup bilateral. Gums red. Otherwise healthy. Eats well. Vaccines up to date. Needs dental cleaning.
+
+Internal Medicine Case:
+5yo F golden retriever. Vomiting 3 days, not eating since yesterday. Lethargic. Temp 39.5. Abdomen tense, pain on palpation. Owner gave human omeprazole but didn't help. No diarrhea. Heart rate 120. Suspect gastroenteritis. Plan: bloodwork, subcutaneous fluids, anti-nausea injection.
+
+Missing Data Test:
+1yo F rabbit. Not eating. Lethargic. Small poop. Give fluids and metoclopramide.
+
+Messy Shorthand 
+8yo MN domestic shorthair. Sneezing/nasal discharge x 1 week. Eyes watery. Owner reports mild appetite decrease. Temp 38.9. Lungs clear on auscultation. Mild dehydration. Suspect feline upper respiratory infection. Start L-lysine and supportive care.

@@ -1,0 +1,36 @@
+body {
+  background-color: #f8fafc;
+}
+
+.spinner {
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-radius: 50%;
+  border-top: 3px solid #fff;
+  width: 20px;
+  height: 20px;
+  animation: spin 1s linear infinite;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 8px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.soap-list {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+}
+
+.soap-list li {
+  margin-bottom: 0.5rem;
+  line-height: 1.4;
+  color: #1e293b;
+}
+
+.soap-list li.not-mentioned {
+  color: #94a3b8;
+  font-style: italic;
+}
