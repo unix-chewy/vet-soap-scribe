@@ -14,7 +14,7 @@ Tasks:
     Technical & Performance:
         ☐ Add manifest.json and a service worker so vet can "Add to Home Screen" on their phone. Model should be 100% offline.
         ☐ Handle "Device Lost" since WebGPU sometimes crashes on mobile due to memory limits.
-        ☐ Add a character counter (e.g., 0 / 2000) and preven them from submitting if it's too long kasi the model will crash or ignore the end of the text.
+        ✔ Add a character counter (e.g., 0 / 2000) and preven them from submitting if it's too long kasi the model will crash or ignore the end of the text. @done (11/6/2026, 11:52:07 PM)
     Quality Check:
         ☐ Test on both iOS and Android devices to ensure the app works well on both platforms.
         ☐ Test with zero internet after the model loaded once.
