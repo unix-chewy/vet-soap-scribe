@@ -1,9 +1,3 @@
-/**
- * SOAP parsing, normalisation, deduplication, and safety-net enforcement.
- *
- * Pure functions only — no WebLLM, no DOM. Safe to unit-test in isolation.
- */
-
 export const NOT_MENTIONED = '[NOT MENTIONED]';
 
 const SECTION_KEYS = ['S', 'O', 'A', 'P'];
@@ -11,151 +5,154 @@ const SECTION_KEYS = ['S', 'O', 'A', 'P'];
 const LABEL_MAP = {
   s: 'S', subjective: 'S', subj: 'S',
   o: 'O', objective: 'O', obj: 'O',
-  a: 'A', assessment: 'A',
-  p: 'P', plan: 'P',
+  a: 'A', assessment: 'A', assess: 'A',
+  p: 'P', plan: 'P', planning: 'P',
 };
 
-/** Lowercase, collapse all punctuation/whitespace into single spaces. */
+const LABEL_STRIP = /^(plan|assessment|assess|subjective|objective|s|o|a|p)\s*:\s*/i;
+const SPECIAL_TOKEN = /<\|[^|>]{1,40}\|>/g;
+const EOS_TOKEN = /<\|im_end\|>|<\|eot_id\|>|<\|end▁of▁sentence\|>|<\|endoftext\|>|<end_of_turn>|<eos>/g;
 export function normalize(s) {
   return String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-/** 
- * Strip bullets and labels, capitalize the first letter, and add a period.
- */
+export function stripSpecialTokens(s) {
+  const text = String(s ?? '');
+  const stop = text.search(EOS_TOKEN);
+  const cut = stop === -1 ? text : text.slice(0, stop);
+  return cut.replace(SPECIAL_TOKEN, ' ');
+}
+
 export function cleanItem(s) {
-  let text = String(s ?? '')
-    .replace(/^[-\u2022*\s]+/, '') // Strip bullets
-    .replace(/^(plan|assessment|subjective|objective|s|o|a|p)\s*:\s*/i, '') // Strip labels like "plan:"
+  let text = stripSpecialTokens(s)
+    .replace(/^[-\u2022*\s]+/, '')
+    .replace(/^\d+[.)]\s+/, '')
+    .replace(LABEL_STRIP, '')
+    .replace(/^["'`]+/, '')
+    .replace(/["'`]+$/, '')
     .replace(/\s+/g, ' ')
     .trim();
 
-  // Don't alter the placeholder
-  if (!text || text === NOT_MENTIONED) return text;
+  if (!text || normalize(text) === normalize(NOT_MENTIONED)) return '';
 
-  // Capitalize first letter
   text = text.charAt(0).toUpperCase() + text.slice(1);
 
-  // Ensure it ends with a period (unless it already has punctuation)
-  if (!/[.!?]$/.test(text)) {
+  if (/[,;\s]$/.test(text) || !/[.!?]$/.test(text)) {
+    text = text.replace(/[,;\s]+$/, '');
     text += '.';
   }
-
   return text;
 }
 
-/**
- * Order-independent comparison key, ignoring articles.
- * "Bilateral tartar buildup." and "Tartar buildup bilateral." collide.
- */
-export function wordKey(s) {
-  return [...new Set(normalize(s).split(' ').filter(Boolean))]
-    .filter((w) => !['the', 'a', 'an'].includes(w))
-    .sort()
-    .join(' ');
-}
-
-/** Drop exact duplicates (after normalisation), preserving first occurrence. */
 export function dedupe(items) {
   const seen = new Set();
-  return items.filter((item) => {
-    const key = normalize(item);
+  const normalizedItems = items.map(i => normalize(i));
+  
+  return items.filter((item, index) => {
+    const key = normalizedItems[index];
     if (!key || seen.has(key)) return false;
+    
+    // NEW: Check if this exact item is just a substring of an adjacent item (prevents double-listing)
+    for (let i = 0; i < items.length; i++) {
+        if (i !== index && normalizedItems[i].includes(key) && normalizedItems[i].length > key.length) {
+            return false; // Drop the shorter substring
+        }
+    }
+
     seen.add(key);
     return true;
   });
 }
 
-/**
- * Convert raw model output into exactly four non-empty arrays of strings.
- * Never throws. A bad answer degrades to [NOT MENTIONED], never a broken page.
- *
- * @param {string} text
- * @returns {{ S: string[], O: string[], A: string[], P: string[] }}
- */
-export function parseSOAP(text) {
-  const out = { S: [], O: [], A: [], P: [] };
-  const raw = String(text || '').replace(/```(?:json)?/gi, '').trim();
+// ---------------------------------------------------------------------------
+// EXPANDED CLINICAL DICTIONARY RULES
+// ---------------------------------------------------------------------------
 
-  const parsed = tryExtractJSON(raw);
+const RULES = [
+  // 1. S: owner-reported / history / symptoms
+  {
+    id: 'owner-reported',
+    section: 'S',
+    re: /\b(owner|client|o\/r|reports?|reported|states?|history of|hx of|according to)\b|\b(vomit\w*|letharg\w*|diarrhea|appetite|eating|drinking|gave|at home|not eating|refusing|scratching|limping|sneez\w*|cough\w*|itch\w*|seizure\w*|shaking|tremor\w*|worse|better|night|morning|yellow fluid|partially digested food|episodes?)\b/i,
+  },
 
-  if (parsed) {
-    // Preferred path: the model honoured the JSON contract.
-    for (const [k, v] of Object.entries(parsed)) {
-      const target = LABEL_MAP[String(k).toLowerCase()];
-      if (!target) continue;
-      const items = Array.isArray(v) ? v : String(v ?? '').split(/\n+/);
-      out[target] = items.map(cleanItem).filter((i) => i && i !== NOT_MENTIONED);
+  // 2. O: vitals (numeric)
+  {
+    id: 'vitals',
+    section: 'O',
+    re: /\b(temp|temperature|fever|t)\b\s*[:=]?\s*\d|\b(hr|heart rate|pulse|rr|resp(iratory)? rate|respiration)\b\s*[:=]?\s*\d|\b(weight|bw|body weight|bcs)\b\s*[:=]?\s*\d|\b\d{2}(\.\d)?\s*(°\s*)?c\b|\b\d+\s*(kg|lbs?|pounds?)\b/i,
+  },
+
+  // 3. A: Diagnosis / Problem List
+  {
+    id: 'diagnosis',
+    section: 'A',
+    re: /^(suspect(ed)?|dx|diagnosis|r\/o|rule out|consistent with|presumptive|likely|most likely|ddx|problems?)\b|\b(diagnosed with|diagnosis of|gastroenteritis|pancreatitis|otitis|uri|uti|dermatitis|infection|fracture|allergy|ccl|parvo|heartworm|lyme|kennel cough|arthritis|tumor|cancer|neoplasia)\b/i,
+  },
+
+  // 4. P: Plan / Treatment / Procedures
+  {
+    id: 'plan',
+    section: 'P',
+    re: /\b(plan|tx|treat(ment)?|therapy|administer|prescrib\w*|dispense\w*|inject\w*|bloodwork|blood work|cbc|chem(istry)?|c\/s|urinalysis|faecal|fecal|x-?rays?|radiograph\w*|ultrasound|ecg|recheck|follow[ -]?up|monitor\w*|hospitali[sz]\w*|admit(ted)?|euthanasi[sz]\w*|give|giving|gave|start|begin|continue|fluid\w*|surgery|dental|cleaning|neuter|spay|medication|meds|antibiotic\w*|nsaid\w*|iv|sq|po|im|fast\w*)\b/i,
+  },
+
+  // 5. O: Exam findings (vitals + physical exam)
+  {
+    id: 'exam-finding',
+    section: 'O',
+    re: /\b(abdomen|abdominal|lungs?|gums?|mm|mucous membranes?|crt|lymph nodes?|ears?|eyes?|throat|oral exam|auscult\w*|palpat\w*|dehydrat\w*|pain\w*|murmurs?|heart sounds|tartar|halitosis|masses?|nodules?|tegument|skin|ocular|nose|nasal|gingiv\w*|plaque|calculus|icterus|jaundice|cyanotic|thin|rectal|gait|hoof|limb|joint|mobility|lameness|shaking|tremor|tense|swelling|redness|erythema|obese|overweight|pale)\b/i,
+  },
+];
+
+const RULES_BY_ID = new Map(RULES.map((r) => [r.id, r.re]));
+const ABBREVIATION = /(?:^|\s)(?:dr|mr|mrs|ms|prof|vs|e\.g|i\.e|approx|incl|dx|tx|hx|fx|sx)\.$/i;
+const SIGNALMENT_CUE = /^\d+\s*(yo|yr|yrs?|y|mo|wk)\b/;
+
+export function classifyItem(item) {
+  const text = normalize(item.replace(/^["'`]+|["'`]+$/g, ''));
+  if (!text) return { section: null, rule: null };
+
+  for (const rule of RULES) {
+    if (!rule.re.test(text)) continue;
+
+    if (rule.section === 'P' && (RULES_BY_ID.get('owner-reported').test(text) || SIGNALMENT_CUE.test(text))) {
+      continue;
     }
-  } else {
-    // Fallback 1: plain "S:\n- ...\nO:\n- ..." text, as described in the spec.
-    const labelled = parseLabelledText(raw);
-    if (labelled) {
-      for (const key of SECTION_KEYS) out[key] = labelled[key];
-    } else if (raw) {
-      // Fallback 2: unrecognised prose. Keep it visible in S rather than drop it.
-      out.S = raw.split(/\n+/).map(cleanItem).filter(Boolean);
+
+    return { section: rule.section, rule: rule.id };
+  }
+  return { section: null, rule: null };
+}
+
+export function enforceRules(soap, meta) {
+  const out = { S: [], O: [], A: [], P: [] };
+
+  for (const from of SECTION_KEYS) {
+    for (const item of soap[from] || []) {
+      if (item === NOT_MENTIONED) continue;
+      const { section, rule } = classifyItem(item);
+
+      if (!section || section === from) {
+        out[from].push(item);
+        continue;
+      }
+      out[section].push(item);
+      if (meta) meta.moved.push({ from, to: section, item, rule });
     }
   }
-
-  // The model's favourite failure: promoting an Objective finding
-  // ("Bilateral tartar buildup.") into the Assessment. Strip those.
-  const objectiveKeys = new Set(out.O.map(wordKey));
-  out.A = out.A.filter((item) => !objectiveKeys.has(wordKey(item)));
 
   for (const key of SECTION_KEYS) {
     out[key] = dedupe(out[key]);
     if (!out[key].length) out[key] = [NOT_MENTIONED];
   }
-
-  // Apply safety net before returning
-  return enforceRules(out);
+  return out;
 }
 
-/**
- * Safety net: moves obvious misclassifications to the right section.
- */
-export function enforceRules(soap) {
-  // 1. Move Vitals from S or P to O
-  const vitalsRegex = /^(temp|hr|rr|weight|bpm|heart rate)\b/i;
-  const vitalsInS = soap.S.filter(item => item !== NOT_MENTIONED && vitalsRegex.test(item));
-  const vitalsInP = soap.P.filter(item => item !== NOT_MENTIONED && vitalsRegex.test(item));
-  
-  if (vitalsInS.length || vitalsInP.length) {
-    soap.S = soap.S.filter(item => !vitalsRegex.test(item));
-    soap.P = soap.P.filter(item => !vitalsRegex.test(item));
-    soap.O.push(...vitalsInS, ...vitalsInP);
-  }
+// ---------------------------------------------------------------------------
+// Parsing Logic
+// ---------------------------------------------------------------------------
 
-  // 2. Move treatments/plans from A to P
-  const planRegex = /^(needs|start|give|apply|administer|prescribe|plan|do|bloodwork|fluids)\b/i;
-  const plansInA = soap.A.filter(item => item !== NOT_MENTIONED && planRegex.test(item));
-  
-  if (plansInA.length) {
-    soap.A = soap.A.filter(item => !planRegex.test(item));
-    soap.P.push(...plansInA);
-  }
-
-  // 3. Move Diagnoses from P to A
-  const diagnosisRegex = /(suspect|diagnosed|consistent with|rule out|otitis|gastroenteritis|uri|ccl)/i;
-  const diagInP = soap.P.filter(item => item !== NOT_MENTIONED && diagnosisRegex.test(item));
-  
-  if (diagInP.length) {
-    soap.P = soap.P.filter(item => !diagnosisRegex.test(item));
-    if (soap.A[0] === NOT_MENTIONED) soap.A = []; // Clear the placeholder
-    soap.A.push(...diagInP);
-  }
-
-  // 4. Clean up and dedupe again just in case the moves created duplicates
-  for (const key of SECTION_KEYS) {
-    soap[key] = dedupe(soap[key]);
-    if (!soap[key].length) soap[key] = [NOT_MENTIONED];
-  }
-  
-  return soap;
-}
-
-/** Pull the outermost JSON object out of a possibly-annotated string. */
 function tryExtractJSON(raw) {
   const start = raw.indexOf('{');
   const end = raw.lastIndexOf('}');
@@ -163,36 +160,209 @@ function tryExtractJSON(raw) {
   try {
     const value = JSON.parse(raw.slice(start, end + 1));
     return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
-  } catch {
-    return null;
+  } catch { return null; }
+}
+
+function repairTruncatedJSON(raw) {
+  const start = raw.indexOf('{');
+  if (start === -1) return null;
+  let text = raw.slice(start).replace(/[,\s]*$/, '');
+  if (!text) return null;
+
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+
+  for (const ch of text) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') stack.push(ch === '{' ? '}' : ']');
+    else if (ch === '}' || ch === ']') stack.pop();
   }
+
+  if (inString) text += '"';
+  text = text.replace(/[,\s]*$/, '');
+  while (stack.length) text += stack.pop();
+
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch { return null; }
+}
+
+function coerceValue(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return v.map(coerceValue).join(' ');
+  try { return Object.values(v).map(coerceValue).join(' '); } catch { return ''; }
 }
 
 const LABEL_LINE = /^\s*(S|O|A|P|Subjective|Objective|Assessment|Plan)\s*[:\-]\s*(.*)$/i;
 
-/** Parse "S:\n- item\n- item\nO:\n..." style plain-text output. */
-function parseLabelledText(raw) {
+export function parseDraftLines(raw) {
   const out = { S: [], O: [], A: [], P: [] };
-  let current = null;
   let found = false;
 
-  for (const line of raw.split(/\r?\n/)) {
+  for (const line of stripSpecialTokens(raw).split(/\r?\n/)) {
     const m = LABEL_LINE.exec(line);
     if (m) {
       const key = LABEL_MAP[m[1].toLowerCase()];
-      if (key) {
+      const rest = cleanItem(m[2]);
+      if (rest) {
         found = true;
-        current = key;
-        const rest = cleanItem(m[2]);
-        if (rest && rest !== NOT_MENTIONED) out[key].push(rest);
-        continue;
+        out[key].push(rest);
       }
     }
-    if (current && line.trim()) {
-      const item = cleanItem(line);
-      if (item && item !== NOT_MENTIONED) out[current].push(item);
+  }
+  return found ? out : null;
+}
+
+export function splitFragments(raw) {
+  return stripSpecialTokens(raw)
+    .split(/\r?\n|;/)
+    .flatMap((chunk) => chunk.split(/(?<=[.!?])\s+(?=[A-Z])/))
+    .map((f) => f.trim())
+    .filter((f) => f && /[a-z]/i.test(f));
+}
+
+export function splitCompoundItem(item) {
+  const text = String(item ?? '').trim();
+  if (!text) return [];
+
+  let pieces = text.split(/(?<=[.!?])\s+(?=[A-Z("'])/).map((p) => p.trim()).filter(Boolean);
+  
+  if (pieces.length === 1 && text.split(',').length > 1 && text.length < 300) {
+      pieces = text.split(/,\s*/).map(p => p.trim()).filter(Boolean);
+  }
+
+  if (pieces.length < 2) return [text];
+  if (pieces.length > 20) return [text];
+
+  const merged = [pieces[0]];
+  for (let i = 1; i < pieces.length; i += 1) {
+    const prev = merged[merged.length - 1];
+    if (ABBREVIATION.test(prev)) merged[merged.length - 1] = `${prev} ${pieces[i]}`;
+    else merged.push(pieces[i]);
+  }
+  return merged;
+}
+
+function expandCompoundItems(soap) {
+  const out = { S: [], O: [], A: [], P: [] };
+  for (const key of SECTION_KEYS) {
+    for (const item of soap[key] || []) out[key].push(...splitCompoundItem(item));
+  }
+  return out;
+}
+
+export function preclassify(notes) {
+  const out = { S: [], O: [], A: [], P: [] };
+  for (const frag of splitFragments(notes)) {
+    const text = frag.replace(/^(plan|assessment|subjective|objective)\s*:\s*/i, '');
+    for (const piece of splitCompoundItem(text)) {
+      const cleaned = cleanItem(piece);
+      if (!cleaned) continue;
+      const { section } = classifyItem(cleaned);
+      out[section || 'S'].push(cleaned);
+    }
+  }
+  for (const key of SECTION_KEYS) out[key] = dedupe(out[key]);
+  return out;
+}
+
+function classifyLooseText(raw) {
+  return preclassify(raw);
+}
+
+function draftIsUsable(draft) {
+  const nonEmpty = SECTION_KEYS.filter((k) => draft[k].length > 0);
+  return nonEmpty.length >= 2;
+}
+
+export function parseSOAP(text, opts = {}) {
+  const raw = String(text || '');
+  const out = { S: [], O: [], A: [], P: [] };
+  const meta = { source: 'empty', moved: [], draftOk: false };
+
+  const stripped = stripSpecialTokens(raw).replace(/```(?:json)?/gi, '').trim();
+
+  const json = tryExtractJSON(stripped) || repairTruncatedJSON(stripped);
+  if (json) {
+    meta.source = 'json';
+    for (const [k, v] of Object.entries(json)) {
+      const target = LABEL_MAP[String(k).toLowerCase()];
+      if (!target) continue;
+      const items = Array.isArray(v) ? v : String(coerceValue(v) ?? '').split(/\n+/);
+      out[target] = items.map(coerceValue).map(cleanItem).filter(Boolean);
+    }
+  } else {
+    const labelled = parseDraftLines(stripped);
+    if (labelled) {
+      meta.source = 'lines';
+      Object.assign(out, labelled);
+    } else if (stripped) {
+      meta.source = 'loose';
+      Object.assign(out, classifyLooseText(stripped));
+    } else if (opts.prefill) {
+      meta.source = 'prefill';
+      Object.assign(out, opts.prefill);
     }
   }
 
-  return found ? out : null;
+  meta.draftOk = draftIsUsable(out);
+  
+  // Apply enforceRules, then format every single item one last time
+  const enforced = enforceRules(expandCompoundItems(out), meta);
+  for (const key of SECTION_KEYS) {
+      enforced[key] = enforced[key].map(cleanItem).filter(Boolean);
+      if (!enforced[key].length) enforced[key] = [NOT_MENTIONED];
+  }
+  
+  return { ...enforced, meta };
+}
+
+export function rescueMissingSections(soap, prefill, meta) {
+  if (!prefill) return soap;
+
+  const out = { S: [...soap.S], O: [...soap.O], A: [...soap.A], P: [...soap.P] };
+  const present = new Set(
+    SECTION_KEYS.flatMap((k) => out[k].filter((i) => i !== NOT_MENTIONED).map((i) => normalize(i))),
+  );
+
+  for (const key of SECTION_KEYS) {
+    // Find items in the deterministic prefill that are completely missing from the model's output
+    const candidates = (prefill[key] || []).filter((i) => i && i !== NOT_MENTIONED && !present.has(normalize(i)));
+    if (!candidates.length) continue;
+
+    // If the section is currently just [NOT MENTIONED], clear it first
+    if (out[key].length === 1 && out[key][0] === NOT_MENTIONED) {
+      out[key] = [];
+    }
+
+    // Add the missing items back in
+    out[key].push(...candidates);
+    for (const c of candidates) present.add(normalize(c));
+    if (meta) meta.rescued.push(key);
+  }
+
+  for (const key of SECTION_KEYS) {
+    out[key] = dedupe(out[key]);
+    if (!out[key].length) out[key] = [NOT_MENTIONED];
+  }
+  return out;
+}
+
+export function renderPlainText(soap, opts = {}) {
+  return SECTION_KEYS
+    .map((key) => {
+      const items = (soap[key] || []).filter((i) => i !== NOT_MENTIONED || !opts.skipEmpty);
+      return `${key}:\n${items.map((i) => `- ${i}`).join('\n')}`;
+    })
+    .join('\n\n');
 }

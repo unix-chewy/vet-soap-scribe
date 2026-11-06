@@ -1,0 +1,5 @@
+Tasks:
+    Model:
+        ☐ Add guardrails to prevent the model from generating text that is too long for the context window and non-related topics
+    UI/UX:
+        ☐ Add a loading spinner when loading the model sa start ng app

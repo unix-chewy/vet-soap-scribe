@@ -32,10 +32,24 @@
       <button id="generateBtn" class="w-full bg-slate-700 hover:bg-slate-800 text-white font-bold py-3 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center">
         Generate SOAP Note
       </button>
-      <div id="status" class="text-center text-sm text-slate-500 mt-3 h-5">Tap the text box to preload the AI.</div>
+
+      <div id="progressWrap" class="hidden mt-3">
+        <div class="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+          <div id="progressBar" class="h-2 bg-teal-600 transition-all duration-300" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <button id="stopBtn" class="hidden w-full mt-2 bg-white border border-slate-300 text-slate-600 font-semibold py-2 rounded-lg hover:bg-slate-50 transition">
+        Stop
+      </button>
+
+      <div id="status" class="text-center text-sm text-slate-500 mt-3 h-5">Enter a case note, then tap Generate.</div>
+      <div id="notice" class="hidden mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800"></div>
     </div>
 
     <div id="outputSection" class="hidden space-y-4">
+      <div id="meta" class="hidden text-xs text-slate-500 text-center px-2"></div>
+
       <div id="card-S" class="hidden bg-teal-50 border border-teal-200 rounded-xl overflow-hidden shadow-sm">
         <div class="bg-teal-100/50 px-4 py-3 border-b border-teal-200 flex items-center gap-3">
           <span class="bg-teal-600 text-white w-6 h-6 flex items-center justify-center rounded font-bold text-sm">S</span>
