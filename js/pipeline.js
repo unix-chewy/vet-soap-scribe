@@ -12,7 +12,8 @@
  */
 
 import { buildDraftMessages, buildCopyMessages, PHASE1_PARAMS, PHASE2_PARAMS } from './prompts.js';
-import { parseSOAP, rescueMissingSections } from './soapParser.js';
+import { parseSOAP, preclassify, rescueMissingSections, dedupe, NOT_MENTIONED } from './soapParser.js';
+import { prepareNotes, batchNotes, budgetRequest, groundSOAP, LIMITS } from './guardrails.js';
 
 /**
  * The only shape a draft line may take. Accepts both the single-letter form we
@@ -117,12 +118,17 @@ function messageText(choice) {
  * @param {(phase: 1|2, state: string) => void} [opts.onProgress]
  */
 export async function runDraft(engine, { notes, onToken, signal, onProgress }) {
+  signal?.throwIfAborted();
   onProgress?.(1, 'Drafting');
+  const messages = buildDraftMessages(notes);
+  const { max_tokens } = budgetRequest(messages, PHASE1_PARAMS.max_tokens);
   const stream = await engine.chat.completions.create({
     ...PHASE1_PARAMS,
-    messages: buildDraftMessages(notes),
+    messages,
+    max_tokens,
     // WebLLM streams as an async iterable when `stream: true`.
   });
+  signal?.throwIfAborted();
 
   let text = '';
   let finishReason = null;
@@ -138,6 +144,14 @@ export async function runDraft(engine, { notes, onToken, signal, onProgress }) {
       const delta = choice.delta?.content ?? '';
       if (delta) {
         text += delta;
+        const lines = text.trim().split('\n');
+        const repeated = lines.length >= 3 && lines.slice(-3).every(line => line === lines.at(-1));
+        if (text.length > LIMITS.maxOutputChars || lines.length > LIMITS.maxOutputLines || repeated) {
+          engine.interruptGenerate?.();
+          text = text.slice(0, LIMITS.maxOutputChars).split('\n').slice(0, LIMITS.maxOutputLines).join('\n');
+          finishReason = 'length';
+          break;
+        }
         onToken?.(text);
       }
       // The trailing chunk carries finish_reason ("stop" | "length").
@@ -148,7 +162,9 @@ export async function runDraft(engine, { notes, onToken, signal, onProgress }) {
       grammarInitS = chunk.usage.extra.grammar_init_s;
     }
   }
-
+  signal?.throwIfAborted();
+  // Never interpret an unfinished clinical fact as a complete one.
+  if (finishReason === 'length') text = text.slice(0, text.lastIndexOf('\n') + 1);
   return { text, finishReason, grammarInitS };
 }
 
@@ -157,14 +173,24 @@ export async function runDraft(engine, { notes, onToken, signal, onProgress }) {
  * "S|O|A|P: <item>." lines, so this can never emit JSON, prose, or a partial
  * object. The model's only job is to copy lines it already wrote.
  */
-export async function runConstrained(engine, { notes, draft, onProgress }) {
+export async function runConstrained(engine, { notes, draft, onProgress, signal }) {
+  signal?.throwIfAborted();
   onProgress?.(2, 'Formatting');
+  const messages = buildCopyMessages(notes, draft);
+  const { max_tokens } = budgetRequest(messages, PHASE2_PARAMS.max_tokens);
   const reply = await engine.chat.completions.create({
     ...PHASE2_PARAMS,
-    messages: buildCopyMessages(notes, draft),
+    messages,
+    max_tokens,
   });
+  signal?.throwIfAborted();
+  let text = messageText(reply.choices?.[0]);
+  const cutShort = reply.choices?.[0]?.finish_reason === 'length' || text.length > LIMITS.maxOutputChars;
+  text = text.slice(0, LIMITS.maxOutputChars);
+  if (cutShort) text = text.slice(0, text.lastIndexOf('\n') + 1);
   return {
-    text: messageText(reply.choices?.[0]),
+    text,
+    cutShort,
     grammarInitS: reply.usage?.extra?.grammar_init_s ?? null,
   };
 }
@@ -174,8 +200,9 @@ export async function runConstrained(engine, { notes, draft, onProgress }) {
  *
  * @returns {Promise<{S:string[],O:string[],A:string[],P:string[], meta: object}>}
  */
-export async function runPipeline(engine, { notes, onToken, onProgress, signal, prefill }) {
+async function runBatch(engine, { notes, onToken, onProgress, signal }) {
   const started = performance.now();
+  const prefill = preclassify(notes);
 
   const phase1 = await runDraft(engine, { notes, onToken, signal, onProgress });
   const repaired1 = repairDraft(phase1.text);
@@ -183,15 +210,18 @@ export async function runPipeline(engine, { notes, onToken, onProgress, signal, 
   let finalText = repaired1.text;
   let phase2Used = false;
   let grammarInitS = phase1.grammarInitS ?? null;
+  let phase2CutShort = false;
 
-  if (needsPhase2(repaired1)) {
+  if (needsPhase2(repaired1) && phase1.finishReason !== 'length') {
     onProgress?.(1, 'Formatting');
     try {
       const out = await runConstrained(engine, {
         notes,
         draft: repaired1.text || phase1.text,
         onProgress,
+        signal,
       });
+      phase2CutShort = out.cutShort;
       if (out.grammarInitS != null) grammarInitS = out.grammarInitS;
       const repaired2 = repairDraft(out.text);
       // Only accept a Phase-2 draft that is at least as complete as what we
@@ -202,6 +232,8 @@ export async function runPipeline(engine, { notes, onToken, onProgress, signal, 
         phase2Used = true;
       }
     } catch (err) {
+      signal?.throwIfAborted();
+      if (err?.name === 'AbortError') throw err;
       // A grammar failure must never lose the Phase-1 result.
       console.warn('Phase 2 failed, falling back to repaired draft:', err);
     }
@@ -209,10 +241,11 @@ export async function runPipeline(engine, { notes, onToken, onProgress, signal, 
 
   const parsed = parseSOAP(finalText, { prefill });
   parsed.meta.rescued = [];
+  const grounded = groundSOAP(parsed, notes);
 
   // Recover sections the model dropped entirely (a truncated draft or a model
   // that simply omitted the Plan), using the deterministic pre-pass.
-  const rescued = rescueMissingSections(parsed, prefill, parsed.meta);
+  const rescued = rescueMissingSections(grounded.soap, prefill, parsed.meta);
 
   return {
     ...rescued,
@@ -220,9 +253,49 @@ export async function runPipeline(engine, { notes, onToken, onProgress, signal, 
       ...parsed.meta,
       phase2Used,
       grammarInitS,
-      cutShort: repaired1.cutShort || phase1.finishReason === 'length',
+      cutShort: repaired1.cutShort || phase1.finishReason === 'length' || phase2CutShort,
+      filteredItems: grounded.removed,
       draftLines: repaired1.lines.length,
       ms: Math.round(performance.now() - started),
     },
   };
+}
+
+/** Validate at the model boundary as well as in the UI. Only filtered source
+ * notes may seed recovery; callers cannot inject their own unvalidated prefill. */
+export async function runPipeline(engine, { notes, onToken, onProgress, signal }) {
+  signal?.throwIfAborted();
+  const started = performance.now();
+  const prepared = prepareNotes(notes);
+  const batches = batchNotes(prepared.notes);
+  const interrupt = () => engine.interruptGenerate?.();
+  signal?.addEventListener('abort', interrupt, { once: true });
+  const merged = { S: [], O: [], A: [], P: [] };
+  const meta = { moved: [], rescued: [], phase2Used: false, cutShort: false, filteredItems: 0, draftLines: 0, batches: batches.length, excludedFragments: prepared.excluded.length };
+  try {
+    for (let i = 0; i < batches.length; i++) {
+      signal?.throwIfAborted();
+      onProgress?.(1, `Drafting batch ${i + 1} of ${batches.length}`);
+      const result = await runBatch(engine, { notes: batches[i], onToken, onProgress, signal });
+      for (const key of ['S', 'O', 'A', 'P']) merged[key].push(...result[key].filter(item => item !== NOT_MENTIONED));
+      meta.moved.push(...result.meta.moved);
+      meta.rescued.push(...result.meta.rescued);
+      meta.phase2Used ||= result.meta.phase2Used;
+      meta.cutShort ||= result.meta.cutShort;
+      meta.filteredItems += result.meta.filteredItems;
+      meta.draftLines += result.meta.draftLines;
+      meta.source = result.meta.source;
+      meta.grammarInitS = result.meta.grammarInitS;
+    }
+    signal?.throwIfAborted();
+    for (const key of ['S', 'O', 'A', 'P']) {
+      merged[key] = dedupe(merged[key]);
+      if (!merged[key].length) merged[key] = [NOT_MENTIONED];
+    }
+    meta.rescued = [...new Set(meta.rescued)];
+    meta.ms = Math.round(performance.now() - started);
+    return { ...merged, meta };
+  } finally {
+    signal?.removeEventListener('abort', interrupt);
+  }
 }

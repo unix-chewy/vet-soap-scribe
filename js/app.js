@@ -1,6 +1,10 @@
-import { CreateWebWorkerMLCEngine, prebuiltAppConfig } from "https://esm.run/@mlc-ai/web-llm";
-import { parseSOAP, preclassify, renderPlainText, NOT_MENTIONED } from "./soapParser.js";
+import { CreateWebWorkerMLCEngine, prebuiltAppConfig } from "https://esm.run/@mlc-ai/web-llm@0.2.87";
+import { renderPlainText, NOT_MENTIONED } from "./soapParser.js";
 import { runPipeline } from "./pipeline.js";
+import { LIMITS, prepareNotes, batchNotes } from './guardrails.js';
+import { createOcrReader, validateImage } from './ocr.js';
+import { renderPhoto, canvasBlob, sourceLineImage } from './imagePreparation.js';
+import { canUseOcrText } from './ocrReview.js';
 
 // ---- Model choice ---------------------------------------------------------
 const MODELS = {
@@ -44,7 +48,16 @@ let currentStep = 1;
 let soapData = { S: [], O: [], A: [], P: [] };
 let soapMeta = null;
 let abortController = null;
-const MAX_CHARS = 1500; // A safe limit for iOS
+const MAX_CHARS = LIMITS.maxNoteChars;
+let ocrBusy = false;
+let ocrController = null;
+let previewUrl = null;
+let sourcePhoto = null;
+let photoCanvas = null;
+let photoOptions = { rotation: 0, margins: {}, enhance: false };
+let previewRevision = 0;
+let photoPreparing = false;
+let photoReady = false;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -90,25 +103,12 @@ async function initEngine() {
     const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 
     const load = (modelId) => {
-      // Clone the prebuilt config so we don't lose the download URLs
-      const modelList = prebuiltAppConfig.model_list.map((m) => {
-        if (m.model_id === modelId) {
-          return {
-            ...m,
-            overrides: {
-              ...m.overrides,
-              context_window_size: 1024, // Smaller memory footprint for iOS
-            },
-          };
-        }
-        return m;
-      });
-
+      // Retain the prebuilt download URLs and pass context options separately.
       return CreateWebWorkerMLCEngine(
         worker, 
         modelId,
         {
-          // chatOpts
+          appConfig: prebuiltAppConfig,
           initProgressCallback: (report) => {
             loadingStatus.textContent = report.text;
             if (typeof report.progress === 'number') {
@@ -118,11 +118,8 @@ async function initEngine() {
           }
         },
         {
-          // engineConfig
-          appConfig: {
-            ...prebuiltAppConfig,
-            model_list: modelList,
-          }
+          // Chat options are the FOURTH argument, shared with request budgeting.
+          context_window_size: LIMITS.contextWindow,
         }
       );
     };
@@ -156,12 +153,23 @@ async function initEngine() {
 
 // ---- Main flow ------------------------------------------------------------
 async function generate() {
-  if (busy) return;
+  if (busy || ocrBusy || inputTextContainer.classList.contains('hidden')) return;
 
   const notes = rawNotes.value.trim();
   if (!notes) return;
+  try {
+    const prepared = prepareNotes(rawNotes.value);
+    batchNotes(prepared.notes);
+  } catch (error) {
+    showNotice(error.message);
+    setStatus('Review your case notes before generating.');
+    rawNotes.focus();
+    return;
+  }
 
   busy = true;
+  rawNotes.disabled = true;
+  tabImage.disabled = true;
   abortController = new AbortController();
   generateBtn.disabled = true;
   generateBtn.innerHTML = '<span class="spinner"></span> Processing...';
@@ -186,19 +194,16 @@ async function generate() {
     }
     if (abortController.signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
-    const prefill = preclassify(notes);
-
     setStatus("Drafting SOAP sections...");
     const result = await runPipeline(engine, {
       notes,
-      prefill,
       signal: abortController.signal,
       onToken: (text) => {
         const lines = (text.match(/\n/g) || []).length + 1;
         setStatus(`Drafting... ${lines} line${lines === 1 ? '' : 's'}`);
       },
       onProgress: (phase, state) => {
-        if (phase === 2) setStatus(`${state} (constrained decode)...`);
+        setStatus(phase === 2 ? `${state} (constrained decode)...` : state);
       },
     });
 
@@ -210,6 +215,11 @@ async function generate() {
     }
 
     renderMeta(soapMeta);
+    const notices = [];
+    if (soapMeta.excludedFragments) notices.push(`${soapMeta.excludedFragments} unrelated or unrecognized note fragment(s) were excluded. Review your input for missing clinical details.`);
+    if (soapMeta.filteredItems) notices.push('Unsupported model text was removed; original note facts were retained.');
+    if (soapMeta.cutShort) notices.push('Generation reached a safety limit. Source facts were recovered; review all sections.');
+    showNotice(notices.join(' '));
     
     outputSection.classList.remove('hidden');
     showStep(1);
@@ -228,14 +238,19 @@ async function generate() {
       console.error("Full Error Object:", err);
       const msg = String(err?.message || err || 'Unknown error');
       if (/ContextWindowSizeExceeded|context window/i.test(msg)) {
-        showNotice('Note trimmed: it was longer than the model\'s context window. Split it into smaller notes.');
+        showNotice('This request exceeded the model context. Nothing was trimmed. Split the note into shorter sentences and try again.');
         setStatus('Note too long for this model.');
+      } else if (err?.name === 'GuardrailError') {
+        showNotice(msg);
+        setStatus('Review your case notes before generating.');
       } else {
         setStatus(`Error: ${msg}`);
       }
     }
   } finally {
     busy = false;
+    rawNotes.disabled = false;
+    tabImage.disabled = false;
     abortController = null;
     if (stopBtn) stopBtn.classList.add('hidden');
     generateBtn.textContent = "Generate SOAP Note";
@@ -271,6 +286,8 @@ function renderMeta(meta) {
     bits.push('classified heuristically — review before saving');
   }
   if (meta.cutShort) bits.push('output was cut short');
+  if (meta.batches > 1) bits.push(`${meta.batches} bounded batches`);
+  if (meta.filteredItems) bits.push(`${meta.filteredItems} unsupported item(s) removed`);
   if (meta.grammarInitS != null) bits.push(`grammar init ${meta.grammarInitS.toFixed(2)}s`);
 
   metaEl.textContent = bits.join(' · ');
@@ -354,22 +371,30 @@ function updateInputState() {
   const count = rawNotes.value.length;
   charCountEl.textContent = count;
   
-  if (count > MAX_CHARS) {
-    generateBtn.disabled = true;
-    setStatus(`Note is too long. Please shorten it to under ${MAX_CHARS} characters.`);
-  } else if (!rawNotes.value.trim()) {
-    generateBtn.disabled = true;
-    setStatus('Ready.');
-  } else {
-    generateBtn.disabled = busy;
-    setStatus('Ready.');
-  }
+  const tooLong = count > MAX_CHARS;
+  rawNotes.setAttribute('aria-invalid', String(tooLong));
+  $('inputLimit').textContent = tooLong ? `Shorten to ${MAX_CHARS} characters. Nothing will be trimmed.` : 'Long notes are processed in smaller batches. Use complete, short sentences.';
+  generateBtn.disabled = busy || ocrBusy || photoPreparing || tooLong || !rawNotes.value.trim() || inputTextContainer.classList.contains('hidden');
 }
 
-rawNotes.addEventListener('input', updateInputState);
+rawNotes.addEventListener('input', () => {
+  invalidateOutput();
+  updateInputState();
+  showNotice('');
+  if (!busy && !ocrBusy) setStatus(rawNotes.value.length > MAX_CHARS ? 'Note too long. Shorten or split it before generating.' : 'Ready.');
+});
+
+function invalidateOutput() {
+  outputSection.classList.add('hidden');
+  soapData = { S: [], O: [], A: [], P: [] };
+  soapMeta = null;
+}
 
 // ---- Reset App Function ---------------------------------------------------
 function resetApp() {
+  if (busy) return;
+  ocrController?.abort();
+  clearImage();
   rawNotes.value = '';
   outputSection.classList.add('hidden');
   soapData = { S: [], O: [], A: [], P: [] };
@@ -389,15 +414,23 @@ const tabImage = $('tabImage');
 const inputTextContainer = $('inputTextContainer');
 const inputImageContainer = $('inputImageContainer');
 const imageInput = $('imageInput');
+const cameraInput = $('cameraInput');
 const dropZoneDefault = $('dropZoneDefault');
 const imagePreview = $('imagePreview');
 const ocrStatus = $('ocrStatus');
+const ocrProgress = $('ocrProgress');
+const ocrReview = $('ocrReview');
+const ocrText = $('ocrText');
+const ocrReader = createOcrReader();
 
 function switchToTextTab() {
   tabText.className = 'flex-1 py-2 rounded-lg text-sm font-bold transition bg-white shadow-sm text-teal-700';
   tabImage.className = 'flex-1 py-2 rounded-lg text-sm font-bold transition text-slate-500 hover:text-slate-700';
   inputTextContainer.classList.remove('hidden');
   inputImageContainer.classList.add('hidden');
+  tabText.setAttribute('aria-pressed', 'true');
+  tabImage.setAttribute('aria-pressed', 'false');
+  updateInputState();
 }
 
 function switchToImageTab() {
@@ -405,43 +438,237 @@ function switchToImageTab() {
   tabText.className = 'flex-1 py-2 rounded-lg text-sm font-bold transition text-slate-500 hover:text-slate-700';
   inputImageContainer.classList.remove('hidden');
   inputTextContainer.classList.add('hidden');
+  tabText.setAttribute('aria-pressed', 'false');
+  tabImage.setAttribute('aria-pressed', 'true');
+  updateInputState();
 }
 
 tabText.addEventListener('click', switchToTextTab);
 tabImage.addEventListener('click', switchToImageTab);
 
-imageInput.addEventListener('change', (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+const cropEdges = ['Left', 'Right', 'Top', 'Bottom'];
 
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    imagePreview.src = e.target.result;
+function clearOcrReview() {
+  ocrReview.classList.add('hidden');
+  ocrText.value = '';
+  $('ocrLines').replaceChildren();
+  $('ocrReviewed').checked = false;
+  updateOcrReview();
+}
+
+function clearImage() {
+  previewRevision++;
+  photoPreparing = false;
+  photoReady = false;
+  sourcePhoto = null;
+  if (photoCanvas) { photoCanvas.width = 0; photoCanvas.height = 0; }
+  photoCanvas = null;
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = null;
+  imagePreview.removeAttribute('src');
+  imagePreview.classList.add('hidden');
+  dropZoneDefault.classList.remove('hidden');
+  $('photoEditor').classList.add('hidden');
+  clearOcrReview();
+  imageInput.value = '';
+  cameraInput.value = '';
+  updateInputState();
+}
+
+function resetPhotoOptions() {
+  photoOptions = { rotation: 0, margins: {}, enhance: false };
+  for (const edge of cropEdges) $(`crop${edge}`).value = '0';
+  $('enhancePhoto').checked = false;
+}
+
+async function updatePhotoPreview() {
+  if (!sourcePhoto || ocrBusy) return;
+  const revision = ++previewRevision;
+  photoPreparing = true;
+  photoReady = false;
+  $('readImageBtn').disabled = true;
+  clearOcrReview();
+  updateInputState();
+  const options = { ...photoOptions, margins: { ...photoOptions.margins } };
+  try {
+    const prepared = await renderPhoto(sourcePhoto, options);
+    const blob = await canvasBlob(prepared.canvas);
+    if (revision !== previewRevision) { prepared.canvas.width = 0; return; }
+    if (photoCanvas) { photoCanvas.width = 0; photoCanvas.height = 0; }
+    photoCanvas = prepared.canvas;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(blob);
+    imagePreview.src = previewUrl;
     imagePreview.classList.remove('hidden');
     dropZoneDefault.classList.add('hidden');
-    
-    ocrStatus.classList.remove('hidden');
-    tabImage.disabled = true;
-    tabText.disabled = true;
+    $('photoQuality').textContent = prepared.quality.warnings.join(' ');
+    photoReady = true;
+    showNotice('');
+    setStatus('Check the photo orientation and crop, then select Read text.');
+  } catch (error) {
+    if (revision === previewRevision) {
+      showNotice(error.message);
+      setStatus('Adjust the photo before reading.');
+    }
+  } finally {
+    if (revision === previewRevision) {
+      photoPreparing = false;
+      $('readImageBtn').disabled = !photoReady;
+      updateInputState();
+    }
+  }
+}
 
-    setTimeout(() => {
-      rawNotes.value = "8yo MN domestic shorthair. Sneezing/nasal discharge x 1 week. Eyes watery. Owner reports mild appetite decrease. Temp 38.9. Lungs clear on auscultation. Mild dehydration. Suspect feline upper respiratory infection. Start L-lysine and supportive care.";
-      
-      imageInput.value = ''; 
-      imagePreview.classList.add('hidden');
-      imagePreview.src = '';
-      dropZoneDefault.classList.remove('hidden');
-      ocrStatus.classList.add('hidden');
-      tabImage.disabled = false;
-      tabText.disabled = false;
+async function selectImage(file) {
+  if (!file || busy || ocrBusy) return;
+  try {
+    validateImage(file);
+  } catch (error) {
+    showNotice(error.message);
+    imageInput.value = '';
+    cameraInput.value = '';
+    return;
+  }
+  clearImage();
+  resetPhotoOptions();
+  sourcePhoto = file;
+  $('photoEditor').classList.remove('hidden');
+  await updatePhotoPreview();
+  imageInput.value = '';
+  cameraInput.value = '';
+}
 
-      switchToTextTab();
-      updateInputState(); // Re-evaluate button and char count
-      setStatus('Image text extracted. Review before generating.');
-      
-    }, 2000);
-  };
-  reader.readAsDataURL(file);
+function updateOcrReview() {
+  const reviewed = $('ocrReviewed').checked;
+  const text = ocrText.value;
+  $('useOcrBtn').disabled = ocrBusy || !canUseOcrText(text, reviewed);
+  $('ocrReviewHint').textContent = text.length > MAX_CHARS
+    ? `Shorten or split this text to ${MAX_CHARS} characters. Nothing was trimmed.`
+    : /\[\s*(unclear|unreadable|illegible)\s*\]/i.test(text)
+      ? 'Resolve unreadable text against the photo or retake the image before using it.'
+      : !reviewed ? 'Correct any mistakes, then confirm that you checked the photo.' : '';
+}
+
+function renderOcrLines(result) {
+  const container = $('ocrLines');
+  container.replaceChildren();
+  for (const [index, line] of result.lines.entries()) {
+    const card = document.createElement('div');
+    card.className = `p-3 rounded-lg border ${line.lowConfidence ? 'border-amber-300 bg-amber-50' : 'border-slate-200 bg-slate-50'}`;
+    const heading = document.createElement('p');
+    heading.className = 'text-xs font-semibold text-slate-600 mb-2';
+    heading.textContent = `Line ${index + 1} · Reader score ${Math.round(line.score * 100)}% · ${line.lowConfidence ? 'Uncertain reading' : 'Check against photo'}`;
+    const source = document.createElement('img');
+    source.src = sourceLineImage(photoCanvas, line.bounds);
+    source.alt = `Original image region for line ${index + 1}`;
+    source.className = 'w-full max-h-28 object-contain bg-white border rounded mb-2';
+    const reading = document.createElement('p');
+    reading.className = 'text-sm text-slate-700 break-words';
+    reading.textContent = `Original reading: ${line.text}`;
+    card.append(heading, source, reading);
+    if (line.criticalValues.length) {
+      const reminder = document.createElement('p');
+      reminder.className = 'text-xs font-semibold text-amber-800 mt-2';
+      reminder.textContent = `Check these numbers: ${line.criticalValues.join(', ')}`;
+      card.append(reminder);
+    }
+    container.append(card);
+  }
+}
+
+function lockPhotoControls(locked) {
+  imageInput.disabled = locked;
+  cameraInput.disabled = locked;
+  $('cameraBtn').disabled = locked;
+  $('clearImageBtn').disabled = locked;
+  $('photoEditor').querySelectorAll('input, button').forEach(control => { control.disabled = locked; });
+  if (!locked) $('readImageBtn').disabled = !photoReady;
+}
+
+async function readImage() {
+  if (!sourcePhoto || !photoCanvas || !photoReady || photoPreparing || busy || ocrBusy) return;
+  ocrBusy = true;
+  ocrController = new AbortController();
+  lockPhotoControls(true);
+  clearOcrReview();
+  ocrStatus.classList.remove('hidden');
+  ocrProgress.value = 0;
+  showNotice('');
+  setStatus('Reading handwriting locally...');
+  updateInputState();
+  try {
+    const image = await canvasBlob(photoCanvas);
+    const result = await ocrReader.recognize(sourcePhoto, {
+      image,
+      signal: ocrController.signal,
+      onProgress: report => {
+        $('ocrStatusText').textContent = report.status || 'Reading image';
+        ocrProgress.value = Math.round((report.progress || 0) * 100);
+      },
+    });
+    ocrText.value = result.text;
+    renderOcrLines(result);
+    $('ocrConfidence').textContent = `${result.model}. Reader scores are not accuracy guarantees. Compare every line, especially names, numbers, doses, and negation.`;
+    ocrReview.classList.remove('hidden');
+    setStatus('Text extracted. Compare it with the photo and correct mistakes.');
+    const weak = result.lines.filter(line => line.lowConfidence).length;
+    showNotice(weak ? `${weak} line(s) have uncertain readings. Correct them using the image before confirming.` : 'Handwriting can be wrong even with a high reader score. Confirm every line before using the text.');
+    ocrText.focus();
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      setStatus('Image reading cancelled. Your case notes were preserved.');
+    } else {
+      showNotice(error.message || 'Could not read this image. Adjust the photo, try again, or type the notes.');
+      setStatus('Image reading failed. Your case notes were preserved.');
+    }
+  } finally {
+    ocrBusy = false;
+    ocrController = null;
+    lockPhotoControls(false);
+    ocrStatus.classList.add('hidden');
+    updateOcrReview();
+    updateInputState();
+  }
+}
+
+imageInput.addEventListener('change', event => selectImage(event.target.files[0]));
+cameraInput.addEventListener('change', event => selectImage(event.target.files[0]));
+$('cameraBtn').addEventListener('click', () => cameraInput.click());
+$('cancelOcrBtn').addEventListener('click', () => ocrController?.abort());
+$('clearImageBtn').addEventListener('click', clearImage);
+$('readImageBtn').addEventListener('click', readImage);
+$('rotateLeftBtn').addEventListener('click', () => { photoOptions.rotation -= 90; updatePhotoPreview(); });
+$('rotateRightBtn').addEventListener('click', () => { photoOptions.rotation += 90; updatePhotoPreview(); });
+$('resetPhotoBtn').addEventListener('click', () => { resetPhotoOptions(); updatePhotoPreview(); });
+for (const edge of cropEdges) {
+  $(`crop${edge}`).addEventListener('change', event => {
+    photoOptions.margins[edge.toLowerCase()] = Number(event.target.value);
+    updatePhotoPreview();
+  });
+}
+$('enhancePhoto').addEventListener('change', event => { photoOptions.enhance = event.target.checked; updatePhotoPreview(); });
+ocrText.addEventListener('input', () => {
+  $('ocrReviewed').checked = false;
+  updateOcrReview();
+});
+$('ocrReviewed').addEventListener('change', updateOcrReview);
+$('useOcrBtn').addEventListener('click', () => {
+  if (ocrBusy || !canUseOcrText(ocrText.value, $('ocrReviewed').checked)) return updateOcrReview();
+  invalidateOutput();
+  rawNotes.value = ocrText.value;
+  switchToTextTab();
+  showNotice('Reviewed text copied to Case Note. Check it once more before generating.');
+  setStatus('Reviewed case notes are ready.');
+  rawNotes.focus();
+});
+$('dropZone').addEventListener('dragover', event => event.preventDefault());
+$('dropZone').addEventListener('drop', event => {
+  event.preventDefault();
+  selectImage(event.dataTransfer.files[0]);
+});
+window.addEventListener('pagehide', () => {
+  ocrController?.abort();
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
 });
 
 // ---- FIX: MISSING EVENT LISTENERS ADDED HERE ------------------------------

@@ -71,46 +71,85 @@
             
             <!-- Input Mode Toggle -->
             <div class="flex p-1 bg-slate-100 rounded-xl mb-5 w-full max-w-sm mx-auto">
-              <button id="tabText" class="flex-1 py-2 rounded-lg text-sm font-bold transition bg-white shadow-sm text-teal-700">
+              <button id="tabText" aria-pressed="true" class="flex-1 py-2 rounded-lg text-sm font-bold transition bg-white shadow-sm text-teal-700">
                 📝 Type Notes
               </button>
-              <button id="tabImage" class="flex-1 py-2 rounded-lg text-sm font-bold transition text-slate-500 hover:text-slate-700">
+              <button id="tabImage" aria-pressed="false" class="flex-1 py-2 rounded-lg text-sm font-bold transition text-slate-500 hover:text-slate-700">
                 📸 Image / Camera
               </button>
             </div>
 
             <!-- Text Input Container -->
             <div id="inputTextContainer">
-              <label class="block font-bold text-slate-700 mb-3 text-sm uppercase tracking-wide">Case Note</label>
-              <textarea id="rawNotes" rows="5" class="w-full p-4 bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:border-teal-500 outline-none transition resize-y mb-4 text-slate-700 font-medium" placeholder="e.g. 2yo M pug. Halitosis. Tartar buildup bilateral. Gums red. Needs dental cleaning.">2yo M pug. Halitosis. Tartar buildup bilateral. Gums red. Otherwise healthy. Eats well. Vaccines up to date. Needs dental cleaning.</textarea>
+              <label for="rawNotes" class="block font-bold text-slate-700 mb-3 text-sm uppercase tracking-wide">Case Note</label>
+              <textarea id="rawNotes" aria-describedby="inputLimit" rows="5" class="w-full p-4 bg-slate-50 border border-slate-300 rounded-xl focus:ring-2 focus:ring-teal-500 focus:border-teal-500 outline-none transition resize-y mb-4 text-slate-700 font-medium" placeholder="e.g. 2yo M pug. Halitosis. Tartar buildup bilateral. Gums red. Needs dental cleaning.">2yo M pug. Halitosis. Tartar buildup bilateral. Gums red. Otherwise healthy. Eats well. Vaccines up to date. Needs dental cleaning.</textarea>
               <div class="text-right text-xs text-slate-400 mt-1">
                 <span id="charCount">0</span> / 1500 characters
               </div>
+              <p id="inputLimit" class="text-xs text-slate-500 mt-2">Long notes are processed in smaller batches. Use complete, short sentences.</p>
             </div>
 
             <!-- Image Input Container -->
             <div id="inputImageContainer" class="hidden mb-4">
-              <label class="block font-bold text-slate-700 mb-3 text-sm uppercase tracking-wide">Upload or Capture Notes</label>
+              <label for="imageInput" class="block font-bold text-slate-700 mb-3 text-sm uppercase tracking-wide">Upload or Capture Notes</label>
               
               <!-- Drag & Drop / Click Zone -->
               <div id="dropZone" class="relative w-full h-48 border-2 border-dashed border-slate-300 rounded-xl bg-slate-50 hover:bg-slate-100 transition flex flex-col items-center justify-center cursor-pointer overflow-hidden group">
-                <input type="file" id="imageInput" accept="image/*" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10">
+                <input type="file" id="imageInput" aria-label="Upload a photo of clinical notes" accept="image/jpeg,image/png,image/webp" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10">
                 
                 <!-- Default State -->
                 <div id="dropZoneDefault" class="text-center pointer-events-none">
                   <span class="text-3xl block mb-2 group-hover:scale-110 transition-transform">📸</span>
-                  <p class="text-sm font-semibold text-slate-600">Tap to upload or use camera</p>
-                  <p class="text-xs text-slate-400 mt-1">JPG, PNG (Max 5MB)</p>
+                  <p class="text-sm font-semibold text-slate-600">Tap to upload or drop a photo</p>
+                  <p class="text-xs text-slate-400 mt-1">JPG, PNG, WebP (Max 5 MB)</p>
                 </div>
 
                 <!-- Preview State -->
-                <img id="imagePreview" class="hidden absolute inset-0 w-full h-full object-contain bg-slate-900/5 p-2" />
+                <img id="imagePreview" alt="Selected clinical notes" class="hidden absolute inset-0 w-full h-full object-contain bg-slate-900/5 p-2" />
               </div>
 
-              <!-- Simulated OCR Status -->
+              <div class="flex gap-3 mt-3">
+                <input type="file" id="cameraInput" accept="image/jpeg,image/png,image/webp" capture="environment" class="hidden">
+                <button id="cameraBtn" type="button" class="flex-1 min-h-11 border border-teal-600 text-teal-700 rounded-lg px-3 py-2 font-semibold disabled:opacity-50">Take photo</button>
+                <button id="clearImageBtn" type="button" class="min-h-11 border border-slate-300 text-slate-600 rounded-lg px-3 py-2 disabled:opacity-50">Clear image</button>
+              </div>
+              <div id="photoEditor" class="hidden mt-4 space-y-3">
+                <p class="text-sm font-semibold text-slate-700">1. Make the writing upright and crop blank margins</p>
+                <div class="flex flex-wrap gap-2">
+                  <button id="rotateLeftBtn" type="button" class="min-h-11 px-3 py-2 border border-slate-300 rounded-lg">Rotate left 90°</button>
+                  <button id="rotateRightBtn" type="button" class="min-h-11 px-3 py-2 border border-slate-300 rounded-lg">Rotate right 90°</button>
+                  <button id="resetPhotoBtn" type="button" class="min-h-11 px-3 py-2 border border-slate-300 rounded-lg">Reset photo</button>
+                </div>
+                <details class="border border-slate-200 rounded-lg p-3">
+                  <summary class="font-semibold text-sm">Crop blank margins (%)</summary>
+                  <p class="text-xs text-slate-500 mt-2">Remove blank space around the writing. Keep every word and number visible in the preview.</p>
+                  <div class="grid grid-cols-2 gap-3 mt-3">
+                    <label class="text-sm">Left <input id="cropLeft" type="number" min="0" max="90" value="0" class="w-full min-h-11 p-2 border rounded-lg"></label>
+                    <label class="text-sm">Right <input id="cropRight" type="number" min="0" max="90" value="0" class="w-full min-h-11 p-2 border rounded-lg"></label>
+                    <label class="text-sm">Top <input id="cropTop" type="number" min="0" max="90" value="0" class="w-full min-h-11 p-2 border rounded-lg"></label>
+                    <label class="text-sm">Bottom <input id="cropBottom" type="number" min="0" max="90" value="0" class="w-full min-h-11 p-2 border rounded-lg"></label>
+                  </div>
+                </details>
+                <label class="flex items-center gap-2 text-sm min-h-11"><input id="enhancePhoto" type="checkbox" class="w-5 h-5">Enhance contrast (original is kept)</label>
+                <p id="photoQuality" role="status" class="text-xs text-amber-800"></p>
+                <button id="readImageBtn" type="button" class="w-full min-h-11 bg-teal-600 text-white px-4 py-3 font-bold rounded-lg disabled:opacity-50">2. Read text from this photo</button>
+              </div>
+              <p class="text-xs text-slate-500 mt-3">PaddleOCR reads printed and handwritten notes locally. Recognition can still be wrong: review each line. Models download on first use. Photos are never uploaded.</p>
+
               <div id="ocrStatus" class="hidden mt-3 text-center text-sm font-semibold text-teal-600">
-                <span class="spinner inline-block align-middle mr-2" style="border-top-color: #0d9488; border-width: 2px; width: 14px; height: 14px;"></span>
-                Extracting text from image...
+                <p id="ocrStatusText" role="status" aria-live="polite">Loading image reader...</p>
+                <progress id="ocrProgress" max="100" value="0" aria-label="Image reading progress" class="w-full mt-2"></progress>
+                <button id="cancelOcrBtn" type="button" class="min-h-11 mt-2 px-4 py-2 border border-slate-300 rounded-lg text-slate-600">Cancel image reading</button>
+              </div>
+              <div id="ocrReview" class="hidden mt-4">
+                <p class="block font-bold text-slate-700 mb-2">3. Compare each reading with the photo</p>
+                <p id="ocrConfidence" class="text-xs text-slate-500 mb-2"></p>
+                <div id="ocrLines" class="space-y-3 mb-4"></div>
+                <label for="ocrText" class="block font-semibold text-slate-700 mb-2">Correct the extracted text</label>
+                <textarea id="ocrText" rows="6" aria-describedby="ocrConfidence" class="w-full p-3 border border-slate-300 rounded-xl text-slate-700"></textarea>
+                <label class="flex items-start gap-3 text-sm text-slate-700 mt-3 py-2"><input id="ocrReviewed" type="checkbox" class="w-5 h-5 mt-0.5 shrink-0">I compared every line with the photo and checked numbers, doses, names, and words such as “no.”</label>
+                <p id="ocrReviewHint" role="status" class="text-xs text-amber-800 mt-2"></p>
+                <button id="useOcrBtn" type="button" disabled class="w-full min-h-11 mt-3 px-4 py-3 bg-teal-600 text-white font-bold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">Use reviewed text (replace case note)</button>
               </div>
             </div>
 
@@ -129,8 +168,8 @@
               Stop
             </button>
 
-            <div id="status" class="text-center text-sm font-medium text-slate-500 mt-4 h-5">Ready.</div>
-            <div id="notice" class="hidden mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800"></div>
+            <div id="status" role="status" aria-live="polite" class="text-center text-sm font-medium text-slate-500 mt-4 min-h-5">Ready.</div>
+            <div id="notice" role="alert" class="hidden mt-3 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800"></div>
           </div>
 
           <!-- Output Section -->

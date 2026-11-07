@@ -1,13 +1,13 @@
 Tasks:
     Model:
-        ☐ Add guardrails to prevent the model from generating text that is too long for the context window and non-related topics
-        ☐ Add the image to text model
+        ✔ Add guardrails to prevent the model from generating text that is too long for the context window and non-related topics @done (11/8/2026, 1:51:56 AM)
+        ✔ Add the image to text model @done (11/8/2026, 1:52:07 AM)
         ☐ Quality check on other mobile view
     UI/UX:
         ✔ Add a loading spinner when loading the model sa start ng app @done (11/6/2026, 10:56:58 PM)
         ☐ Make the output editable
         ✔ Add the camera input and input image functionality. @done (11/6/2026, 11:18:16 PM)
-        ☐ Improve the camera/image input UI to make it more user friendly and intuitive.
+        ✔ Improve the camera/image input UI to make it more user friendly and intuitive. @done (11/8/2026, 1:52:18 AM)
         ☐ Replace alerts with a modal and not the built in browser alert
         ☐ Add a small "X" inside the text area to clear the text area
         ☐ Add a "Regenerate" button to each section to allow regenerating the output without re-typing everything
@@ -18,4 +18,3 @@ Tasks:
     Quality Check:
         ☐ Test on both iOS and Android devices to ensure the app works well on both platforms.
         ☐ Test with zero internet after the model loaded once.
-S
